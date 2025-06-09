@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpHandler;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,7 +18,6 @@ import my.kukish.service.RedisCacheService;
 import my.kukish.service.WeatherService;
 import org.json.JSONArray;
 import org.json.JSONObject;
-// ...другие импорты
 
 public class WeatherHandler implements HttpHandler {
     private final GeoService geoService = new GeoService();
@@ -45,7 +45,7 @@ public class WeatherHandler implements HttpHandler {
         WeatherData weatherData;
 
         try {
-            // 1. Проверяем кэш
+            // 1. Проверка Redis-кэша
             String cached = redisCacheService.get(city);
             if (cached != null) {
                 System.out.println("Данные из Redis-кэша");
@@ -62,14 +62,9 @@ public class WeatherHandler implements HttpHandler {
                 weatherData = new WeatherData(timeList, tempList);
             } else {
                 System.out.println("Данные не найдены в кэше, обращаемся к API");
-
-                // 2. Получаем координаты
                 CityCoordinates coordinates = geoService.getCoordinates(city);
-
-                // 3. Получаем прогноз
                 weatherData = weatherService.getWeatherData(coordinates.getLatitude(), coordinates.getLongitude());
 
-                // 4. Сохраняем в Redis
                 JSONObject toCache = new JSONObject();
                 toCache.put("time", weatherData.getTime());
                 toCache.put("temperature", weatherData.getTemperature());
@@ -77,7 +72,7 @@ public class WeatherHandler implements HttpHandler {
                 redisCacheService.save(city, toCache.toString());
             }
 
-            // 5. Формируем HTML-таблицу
+            // Формируем HTML
             StringBuilder html = new StringBuilder();
             html.append("<html><head><title>Weather in ")
                     .append(city)
@@ -85,7 +80,7 @@ public class WeatherHandler implements HttpHandler {
                     .append(city)
                     .append("</h1><table border='1'><tr><th>Время</th><th>Температура (°C)</th></tr>");
 
-            for (int i = 0; i < 24; i++) {
+            for (int i = 0; i < 24 && i < weatherData.getTime().size(); i++) {
                 html.append("<tr><td>")
                         .append(weatherData.getTime().get(i))
                         .append("</td><td>")
@@ -93,14 +88,33 @@ public class WeatherHandler implements HttpHandler {
                         .append("</td></tr>");
             }
 
-            html.append("</table></body></html>");
-            sendResponse(exchange, 200, html.toString());
+            html.append("</table><br><h2>График температуры</h2>");
+
+            // График
+            String timeJson = new JSONArray(weatherData.getTime()).toString();
+            String tempJson = new JSONArray(weatherData.getTemperature()).toString();
+
+            String chartUrl = "https://quickchart.io/chart?c=" +
+                    URLEncoder.encode("{type:'line',data:{labels:" + timeJson +
+                            ",datasets:[{label:'Температура',data:" + tempJson + "}]} }", StandardCharsets.UTF_8);
+
+            html.append("<img src='").append(chartUrl).append("' alt='График температуры' />");
+
+            html.append("</body></html>");
+
+            byte[] response = html.toString().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/html; charset=UTF-8");
+            exchange.sendResponseHeaders(200, response.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(response);
+            }
 
         } catch (Exception e) {
             e.printStackTrace();
-            sendResponse(exchange, 500, "Ошибка: " + e.getMessage());
+            sendResponse(exchange, 500, "Internal server error: " + e.getMessage());
         }
     }
+
 
     private void sendResponse(HttpExchange exchange, int statusCode, String response) throws IOException {
         byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
